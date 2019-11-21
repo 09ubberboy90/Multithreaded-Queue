@@ -107,15 +107,13 @@
 #include <list>
 
 #include <thread>
-#include <mutex>
-
-std::mutex mu;
-
+#include "threadClass.hpp"
 #define CRAWLER_THREADS 2
 
+customTable theTable;
+customWorkQ workQ;
+
 std::vector<std::string> dirs;
-std::unordered_map<std::string, std::list<std::string>> theTable;
-std::list<std::string> workQ;
 
 std::string dirName(const char *c_str)
 {
@@ -205,14 +203,14 @@ static void process(const char *file, std::list<std::string> *ll)
         // 2bii. append file name to dependency list
         ll->push_back({name});
         // 2bii. if file name not already in table ...
-        if (theTable.find(name) != theTable.end())
+        if (theTable.find(name))
         {
             continue;
         }
         // ... insert mapping from file name to empty list in table ...
-        theTable.insert({name, {}});
+        theTable.insert(name, {});
         // ... append file name to workQ
-        workQ.push_back(name);
+        workQ.push(name);
     }
     // 3. close file
     fclose(fd);
@@ -233,7 +231,7 @@ static void printDependencies(std::unordered_set<std::string> *printed,
         std::string name = toProcess->front();
         toProcess->pop_front();
         // 3. lookup file in the table, yielding list of dependencies
-        std::list<std::string> *ll = &theTable[name];
+        std::list<std::string> *ll = theTable.get(name);
         // 4. iterate over dependencies
         for (auto iter = ll->begin(); iter != ll->end(); iter++)
         {
@@ -300,29 +298,28 @@ int main(int argc, char *argv[])
         std::string obj = pair.first + ".o";
 
         // 3a. insert mapping from file.o to file.ext
-        theTable.insert({obj, {argv[i]}});
+        theTable.insert(obj, {argv[i]});
 
         // 3b. insert mapping from file.ext to empty list
-        theTable.insert({argv[i], {}});
+        theTable.insert(argv[i], {});
 
         // 3c. append file.ext on workQ
-        workQ.push_back(argv[i]);
+        workQ.push(argv[i]);
     }
 
     // 4. for each file on the workQ
-    while (workQ.size() > 0)
+    while (workQ.get_size() > 0)
     {
-        std::string filename = workQ.front();
-        workQ.pop_front();
+        std::string filename = workQ.get_pop_front();
 
-        if (theTable.find(filename) == theTable.end())
+        if (!theTable.find(filename))
         {
             fprintf(stderr, "Mismatch between table and workQ\n");
             return -1;
         }
 
         // 4a&b. lookup dependencies and invoke 'process'
-        process(filename.c_str(), &theTable[filename]);
+        process(filename.c_str(), theTable.get(filename));
     }
 
     // 5. for each file argument
