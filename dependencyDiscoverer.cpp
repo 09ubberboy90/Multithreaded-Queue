@@ -105,15 +105,23 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <list>
+#include <atomic>
 
 #include <thread>
 #include "threadClass.hpp"
-#define CRAWLER_THREADS 2
+
+std::mutex global_mutex;
 
 customTable theTable;
 customWorkQ workQ;
 
 std::vector<std::string> dirs;
+std::condition_variable pushed;
+std::condition_variable done;
+
+bool workToDo = false;
+std::atomic_int nbWorker;
+std::vector<std::thread> threadVec;
 
 std::string dirName(const char *c_str)
 {
@@ -133,9 +141,9 @@ std::pair<std::string, std::string> parseFile(const char *c_file)
     {
         return {file, ""};
     }
-    else
-    {
-        return {file.substr(0, pos), file.substr(pos + 1)};
+else
+{
+    return {file.substr(0, pos), file.substr(pos + 1)};
     }
 }
 
@@ -201,7 +209,9 @@ static void process(const char *file, std::list<std::string> *ll)
         }
         *q = '\0';
         // 2bii. append file name to dependency list
+        std::unique_lock<std::mutex> lock{global_mutex};
         ll->push_back({name});
+        lock.unlock();
         // 2bii. if file name not already in table ...
         if (theTable.find(name))
         {
@@ -210,7 +220,11 @@ static void process(const char *file, std::list<std::string> *ll)
         // ... insert mapping from file name to empty list in table ...
         theTable.insert(name, {});
         // ... append file name to workQ
+        
         workQ.push(name);
+        workToDo = true;  
+        pushed.notify_one();
+
     }
     // 3. close file
     fclose(fd);
@@ -249,12 +263,45 @@ static void printDependencies(std::unordered_set<std::string> *printed,
         }
     }
 }
+void assignThreads()
+{
+    std::unique_lock<std::mutex> lock(global_mutex);
+    pushed.wait(lock, [] { return workToDo; });
+    lock.unlock();
+    nbWorker++;
+    do
+    {
+        std::string filename = workQ.get_pop_front();
+        process(filename.c_str(), theTable.get(filename));
+    } while (workQ.get_size()>0);
+
+    nbWorker--;
+    done.notify_one();
+    
+    // if (!theTable.find(filename))
+    // {   lock.lock();
+    //     fprintf(stderr, "Mismatch between table and workQ\n");
+    //     lock.unlock();
+    //     return -1;
+    // }
+
+    // 4a&b. lookup dependencies and invoke 'process'
+}
 
 int main(int argc, char *argv[])
 {
     // 1. look up CPATH in environment
     char *cpath = getenv("CPATH");
-
+    int CRAWLER_THREAD;
+    nbWorker = 0;
+    if (const char *env_p = std::getenv("CRAWLER_THREADS"))
+        //TODO: Make sure this is correctly defined
+        CRAWLER_THREAD = std::stoi(std::getenv("CRAWLER_THREADS"));
+    else
+    {
+        // no environment
+        CRAWLER_THREAD = 2;
+    }
     // determine the number of -Idir arguments
     int i;
     for (i = 1; i < argc; i++)
@@ -283,6 +330,11 @@ int main(int argc, char *argv[])
         dirs.push_back(str.substr(last));
     }
     // 2. finished assembling dirs vector
+    for (int i = 0; i < CRAWLER_THREAD; i++)
+    {
+        std::thread worker(&assignThreads);
+        threadVec.push_back(std::move(worker));
+    }
 
     // 3. for each file argument ...
     for (i = start; i < argc; i++)
@@ -298,6 +350,7 @@ int main(int argc, char *argv[])
         std::string obj = pair.first + ".o";
 
         // 3a. insert mapping from file.o to file.ext
+        
         theTable.insert(obj, {argv[i]});
 
         // 3b. insert mapping from file.ext to empty list
@@ -305,34 +358,27 @@ int main(int argc, char *argv[])
 
         // 3c. append file.ext on workQ
         workQ.push(argv[i]);
+        workToDo = true;
+        pushed.notify_one();
     }
 
-    // 4. for each file on the workQ
-    while (workQ.get_size() > 0)
+    std::unique_lock<std::mutex> lock(global_mutex);
+    done.wait(lock, [] { return nbWorker == 0; });
+    for (std::thread &i: threadVec)
     {
-        std::string filename = workQ.get_pop_front();
-
-        if (!theTable.find(filename))
-        {
-            fprintf(stderr, "Mismatch between table and workQ\n");
-            return -1;
-        }
-
-        // 4a&b. lookup dependencies and invoke 'process'
-        process(filename.c_str(), theTable.get(filename));
+        i.join();
     }
-
     // 5. for each file argument
     for (i = start; i < argc; i++)
     {
-        // 5a. create hash table in which to track file names already printed
+        // 5a. create hash table in which    to track file names already printed
         std::unordered_set<std::string> printed;
         // 5b. create list to track dependencies yet to print
         std::list<std::string> toProcess;
 
         std::pair<std::string, std::string> pair = parseFile(argv[i]);
 
-        std::string obj = pair.first + ".o";
+        std::string obj = pair.first + ".o";    
         // 5c. print "foo.o:" ...
         printf("%s:", obj.c_str());
         // 5c. ... insert "foo.o" into hash table and append to list
@@ -346,3 +392,4 @@ int main(int argc, char *argv[])
 
     return 0;
 }
+
