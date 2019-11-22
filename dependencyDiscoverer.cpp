@@ -224,7 +224,7 @@ static void process(const char *file, std::list<std::string> *ll)
         workQ.push(name);
         workToDo = true;  
         pushed.notify_one();
-
+        workToDo = false;
     }
     // 3. close file
     fclose(fd);
@@ -272,20 +272,17 @@ void assignThreads()
     do
     {
         std::string filename = workQ.get_pop_front();
-        process(filename.c_str(), theTable.get(filename));
+        if(!filename.empty())
+        {
+            process(filename.c_str(), theTable.get(filename));
+        }
+        
     } while (workQ.get_size()>0);
 
     nbWorker--;
     done.notify_one();
-    
-    // if (!theTable.find(filename))
-    // {   lock.lock();
-    //     fprintf(stderr, "Mismatch between table and workQ\n");
-    //     lock.unlock();
-    //     return -1;
-    // }
-
-    // 4a&b. lookup dependencies and invoke 'process'
+    lock.lock();
+    lock.unlock();
 }
 
 int main(int argc, char *argv[])
@@ -295,8 +292,8 @@ int main(int argc, char *argv[])
     int CRAWLER_THREAD;
     nbWorker = 0;
     if (const char *env_p = std::getenv("CRAWLER_THREADS"))
-        //TODO: Make sure this is correctly defined
-        CRAWLER_THREAD = std::stoi(std::getenv("CRAWLER_THREADS"));
+        //If crawler thread is not defined 
+        CRAWLER_THREAD = std::atoi(std::getenv("CRAWLER_THREADS"));
     else
     {
         // no environment
@@ -329,6 +326,7 @@ int main(int argc, char *argv[])
         }
         dirs.push_back(str.substr(last));
     }
+
     // 2. finished assembling dirs vector
     for (int i = 0; i < CRAWLER_THREAD; i++)
     {
@@ -361,10 +359,12 @@ int main(int argc, char *argv[])
         workToDo = true;
         pushed.notify_one();
     }
-
+    assignThreads();
     std::unique_lock<std::mutex> lock(global_mutex);
     done.wait(lock, [] { return nbWorker == 0; });
-    for (std::thread &i: threadVec)
+    lock.unlock();
+
+    for (std::thread &i : threadVec)
     {
         i.join();
     }
