@@ -109,7 +109,7 @@
 
 #include <thread>
 #include "threadClass.hpp"
-
+#include <chrono>
 std::mutex global_mutex;
 
 customTable theTable;
@@ -120,6 +120,7 @@ std::condition_variable pushed;
 std::condition_variable done;
 
 bool workToDo = false;
+bool allWorkDone = false;
 std::atomic_int nbWorker;
 std::vector<std::thread> threadVec;
 
@@ -222,10 +223,10 @@ static void process(const char *file, std::list<std::string> *ll)
         // ... append file name to workQ
         
         workQ.push(name);
-        workToDo = true;  
-        pushed.notify_one();
-        //workToDo = false;
     }
+    workToDo = true;
+    pushed.notify_one();
+    workToDo = false;
     // 3. close file
     fclose(fd);
 }
@@ -265,24 +266,29 @@ static void printDependencies(std::unordered_set<std::string> *printed,
 }
 void assignThreads()
 {
-    std::unique_lock<std::mutex> lock(global_mutex);
-    pushed.wait(lock, [] { return workToDo || nbWorker == 0; });
-    lock.unlock();
-    nbWorker++;
     do
     {
-        std::string filename = workQ.get_pop_front();
-        if(!filename.empty())
+        std::unique_lock<std::mutex> lock(global_mutex);
+        pushed.wait(lock, [] { return workToDo || allWorkDone; });
+        if(allWorkDone)
         {
-            process(filename.c_str(), theTable.get(filename));
+            break;
         }
-        
-    } while (workQ.get_size()>0);
+        lock.unlock();
+        nbWorker++;
+        do
+        {
+            std::string filename = workQ.get_pop_front();
+            if (!filename.empty())
+            {
+                process(filename.c_str(), theTable.get(filename));
+            }
 
-    nbWorker--;
-    done.notify_one();
-    lock.lock();
-    lock.unlock();
+        } while (workQ.get_size() > 0);
+
+        nbWorker--;
+        done.notify_one();
+    } while (nbWorker > 0);
 }
 
 int main(int argc, char *argv[])
@@ -359,11 +365,14 @@ int main(int argc, char *argv[])
         workToDo = true;
         pushed.notify_one();
     }
-    assignThreads();
+    //assignThreads();
     std::unique_lock<std::mutex> lock(global_mutex);
+
     done.wait(lock, [] { return nbWorker == 0; });
     lock.unlock();
 
+    allWorkDone = true;
+    pushed.notify_all();
     for (std::thread &i : threadVec)
     {
         i.join();
