@@ -224,7 +224,7 @@ static void process(const char *file, std::list<std::string> *ll)
         workQ.push(name);
         workToDo = true;  
         pushed.notify_one();
-        workToDo = false;
+        //workToDo = false;
     }
     // 3. close file
     fclose(fd);
@@ -266,7 +266,7 @@ static void printDependencies(std::unordered_set<std::string> *printed,
 void assignThreads()
 {
     std::unique_lock<std::mutex> lock(global_mutex);
-    pushed.wait(lock, [] { return workToDo; });
+    pushed.wait(lock, [] { return workToDo || nbWorker == 0; });
     lock.unlock();
     nbWorker++;
     do
