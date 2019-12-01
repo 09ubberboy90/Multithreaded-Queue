@@ -108,21 +108,18 @@
 #include <atomic>
 
 #include <thread>
-#include "threadClass.hpp"
-#include <chrono>
-std::mutex global_mutex;
+#include "tasks.hpp"
 
+std::mutex mu;
 customTable theTable;
-customWorkQ workQ;
 
 std::vector<std::string> dirs;
 std::condition_variable pushed;
 std::condition_variable done;
 
 bool workToDo = false;
-bool allWorkDone = false;
+std::atomic_bool allWorkDone;
 std::atomic_int nbWorker;
-std::vector<std::thread> threadVec;
 
 std::string dirName(const char *c_str)
 {
@@ -163,7 +160,7 @@ static FILE *openFile(const char *file)
 }
 
 // process file, looking for #include "foo.h" lines
-static void process(const char *file, std::list<std::string> *ll)
+static void process(const char *file, std::list<std::string> *ll, task_system *workQ)
 {
     char buf[4096], name[4096];
     // 1. open the file
@@ -210,7 +207,7 @@ static void process(const char *file, std::list<std::string> *ll)
         }
         *q = '\0';
         // 2bii. append file name to dependency list
-        std::unique_lock<std::mutex> lock{global_mutex};
+        std::unique_lock<std::mutex> lock{mu};
         ll->push_back({name});
         lock.unlock();
         // 2bii. if file name not already in table ...
@@ -222,11 +219,10 @@ static void process(const char *file, std::list<std::string> *ll)
         theTable.insert(name, {});
         // ... append file name to workQ
         
-        workQ.push(name);
+        workQ->async(name);
+        workToDo = true;
+        pushed.notify_one();
     }
-    workToDo = true;
-    pushed.notify_one();
-    workToDo = false;
     // 3. close file
     fclose(fd);
 }
@@ -264,28 +260,44 @@ static void printDependencies(std::unordered_set<std::string> *printed,
         }
     }
 }
-void assignThreads()
+void assignThreads(std::vector<notification_queue>& q, int index, int max, task_system* workQ)
 {
     do
     {
-        std::unique_lock<std::mutex> lock(global_mutex);
+        std::unique_lock<std::mutex> lock(mu);
         pushed.wait(lock, [] { return workToDo || allWorkDone; });
-        if(allWorkDone)
-        {
-            break;
-        }
         lock.unlock();
+        // if (allWorkDone)
+        // {
+        //     break;
+        // }
+        
         nbWorker++;
-        do
+        while (true)
         {
-            std::string filename = workQ.get_pop_front();
+            // work available on personnal queue
+            std::string filename = q[index].pop();
             if (!filename.empty())
             {
-                process(filename.c_str(), theTable.get(filename));
+                process(filename.c_str(), theTable.get(filename), workQ);
             }
-
-        } while (workQ.get_size() > 0);
-
+            else
+            {
+                break;
+            }
+            
+        }
+        for (auto n = 0; n != max; n++)
+        {
+            std::string filename = q[(index + n) % max].try_pop();
+            if (!filename.empty())
+            {
+                process(filename.c_str(), theTable.get(filename), workQ);
+                // once a steal was successful -> stop looking
+                continue;
+            }
+        }
+        // if we reach here it means theres no more job to do...
         nbWorker--;
         done.notify_one();
     } while (nbWorker > 0);
@@ -297,6 +309,7 @@ int main(int argc, char *argv[])
     char *cpath = getenv("CPATH");
     int CRAWLER_THREAD;
     nbWorker = 0;
+    allWorkDone = false;
     if (const char *env_p = std::getenv("CRAWLER_THREADS"))
         //If crawler thread is not defined 
         CRAWLER_THREAD = std::atoi(std::getenv("CRAWLER_THREADS"));
@@ -305,6 +318,8 @@ int main(int argc, char *argv[])
         // no environment
         CRAWLER_THREAD = 2;
     }
+    task_system workQ(assignThreads, CRAWLER_THREAD);
+    
     // determine the number of -Idir arguments
     int i;
     for (i = 1; i < argc; i++)
@@ -334,11 +349,6 @@ int main(int argc, char *argv[])
     }
 
     // 2. finished assembling dirs vector
-    for (int i = 0; i < CRAWLER_THREAD; i++)
-    {
-        std::thread worker(&assignThreads);
-        threadVec.push_back(std::move(worker));
-    }
 
     // 3. for each file argument ...
     for (i = start; i < argc; i++)
@@ -361,22 +371,18 @@ int main(int argc, char *argv[])
         theTable.insert(argv[i], {});
 
         // 3c. append file.ext on workQ
-        workQ.push(argv[i]);
-        workToDo = true;
+        workQ.async(argv[i]);
         pushed.notify_one();
     }
+
     //assignThreads();
-    std::unique_lock<std::mutex> lock(global_mutex);
-
+    std::unique_lock<std::mutex> lock(mu);
     done.wait(lock, [] { return nbWorker == 0; });
-    lock.unlock();
-
     allWorkDone = true;
     pushed.notify_all();
-    for (std::thread &i : threadVec)
-    {
-        i.join();
-    }
+    lock.unlock();
+    workQ.setDone();
+
     // 5. for each file argument
     for (i = start; i < argc; i++)
     {
@@ -398,7 +404,7 @@ int main(int argc, char *argv[])
 
         printf("\n");
     }
-
+    
     return 0;
 }
 
