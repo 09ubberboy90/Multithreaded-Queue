@@ -25,6 +25,7 @@ public:
         if (!lock || q.empty()) return ""; // we have to(!) check if the lock was acquired
         auto str = q.front();
         q.pop_front();
+        lock.unlock();
         return str;
     }
 
@@ -35,8 +36,10 @@ public:
             if (!lock) return false; // return false to indicate that the push has not been
             // successful
             q.push_back(str);
+            lock.unlock();
         }
         ready.notify_one();
+
         return true; // return true if the task was successfully added to the queue
     }
 
@@ -47,6 +50,8 @@ public:
         if (q.empty()) return ""; // if the queue is empty (because done was set) we return 'nothing'
         auto f = q.front();
         q.pop_front();
+        lock.unlock();
+
         return f;
     }
 
@@ -55,6 +60,8 @@ public:
         {
             std::unique_lock<std::mutex> lock(m);           // enter critical section to protect the std::list
             q.push_back(str);   // add task f to the queue
+            lock.unlock();
+
         }                   // exit critical section
         ready.notify_one(); // notify a waiting thread that a task is in the queue
     }
@@ -63,6 +70,7 @@ public:
         {
             std::unique_lock<std::mutex> lock(m);      // enter critical region to protect 'done'
             done = true; // set done
+            lock.unlock();
         }
         ready.notify_all(); // Notify all threads that they should finish
     }

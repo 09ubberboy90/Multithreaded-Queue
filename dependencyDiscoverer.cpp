@@ -378,9 +378,9 @@ int main(int argc, char *argv[])
     //assignThreads();
     std::unique_lock<std::mutex> lock(mu);
     done.wait(lock, [] { return nbWorker == 0; });
+    lock.unlock();
     allWorkDone = true;
     pushed.notify_all();
-    lock.unlock();
     workQ.setDone();
 
     // 5. for each file argument
